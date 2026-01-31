@@ -534,15 +534,37 @@ def load_csv_data(salesforce_file, amplitude_file, zendesk_file) -> Optional[pd.
         
         # Merge Amplitude data
         if amp_df is not None and 'account_id' in amp_df.columns:
+            # Rename columns if needed (handle sample data column names)
+            column_mapping = {
+                'integrations_enabled': 'api_integration_count',
+            }
+            amp_df = amp_df.rename(columns={k: v for k, v in column_mapping.items() if k in amp_df.columns})
             merged_df = merged_df.merge(amp_df, on='account_id', how='left', suffixes=('', '_amp'))
         
         # Merge Zendesk data
         if zd_df is not None and 'account_id' in zd_df.columns:
             merged_df = merged_df.merge(zd_df, on='account_id', how='left', suffixes=('', '_zd'))
         
+        # Handle duplicate columns from merges (prefer non-suffixed version)
+        for col in list(merged_df.columns):
+            if col.endswith('_amp') or col.endswith('_zd'):
+                base_col = col.rsplit('_', 1)[0]
+                if base_col in merged_df.columns:
+                    # Fill NaN in base column with values from suffixed column
+                    merged_df[base_col] = merged_df[base_col].fillna(merged_df[col])
+                    merged_df = merged_df.drop(columns=[col])
+                else:
+                    # Rename suffixed column to base name
+                    merged_df = merged_df.rename(columns={col: base_col})
+        
         # Fill missing values with reasonable defaults
         numeric_cols = merged_df.select_dtypes(include=[np.number]).columns
-        merged_df[numeric_cols] = merged_df[numeric_cols].fillna(merged_df[numeric_cols].median())
+        for col in numeric_cols:
+            if merged_df[col].isna().any():
+                median_val = merged_df[col].median()
+                if pd.isna(median_val):
+                    median_val = 0
+                merged_df[col] = merged_df[col].fillna(median_val)
         
         return merged_df
     
@@ -795,26 +817,27 @@ def compute_risk_scores(df: pd.DataFrame, benchmarks: Benchmark) -> pd.DataFrame
             df[col] = default
     
     # Calculate deviation scores (higher = worse)
+    # Use np.maximum for element-wise max with pandas Series
     df['product_risk_score'] = (
-        max(0, (benchmarks.core_module_adoption - df['core_module_adoption'].clip(0, 1))) * 0.4 +
-        max(0, (benchmarks.seat_utilization - df['seat_utilization_pct'].clip(0, 1))) * 0.3 +
-        max(0, (0.7 - df['feature_adoption_score'].clip(0, 1))) * 0.3
+        np.maximum(0, (benchmarks.core_module_adoption - df['core_module_adoption'].clip(0, 1))) * 0.4 +
+        np.maximum(0, (benchmarks.seat_utilization - df['seat_utilization_pct'].clip(0, 1))) * 0.3 +
+        np.maximum(0, (0.7 - df['feature_adoption_score'].clip(0, 1))) * 0.3
     )
     
     df['process_risk_score'] = (
-        max(0, (benchmarks.onboarding_completion - df['onboarding_completion_pct'].clip(0, 1))) * 0.35 +
+        np.maximum(0, (benchmarks.onboarding_completion - df['onboarding_completion_pct'].clip(0, 1))) * 0.35 +
         np.clip((benchmarks.weekly_logins - df['weekly_logins']) / benchmarks.weekly_logins, 0, 1) * 0.35 +
         np.clip((df['time_to_first_value_days'] - benchmarks.time_to_first_value_days) / 30, 0, 1) * 0.30
     )
     
     df['development_risk_score'] = (
-        max(0, (0.8 - df['training_completion_pct'].clip(0, 1))) * 0.5 +
+        np.maximum(0, (0.8 - df['training_completion_pct'].clip(0, 1))) * 0.5 +
         np.clip((5 - df['api_integration_count']) / 5, 0, 1) * 0.5
     )
     
     df['relationship_risk_score'] = (
         np.clip((benchmarks.nps_score - df['nps_score']) / 10, 0, 1) * 0.35 +
-        max(0, (0.8 - df['csm_engagement_score'].clip(0, 1))) * 0.35 +
+        np.maximum(0, (0.8 - df['csm_engagement_score'].clip(0, 1))) * 0.35 +
         np.clip(df['support_tickets_last_quarter'] / 10, 0, 1) * 0.30
     )
     
